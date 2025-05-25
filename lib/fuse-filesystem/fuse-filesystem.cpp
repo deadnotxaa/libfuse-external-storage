@@ -1,9 +1,11 @@
 #include "fuse-filesystem.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -144,7 +146,6 @@ int fes::FuseFilesystem::ff_write(const char* path, const char* buf, size_t size
 
     file.seekp(offset);
     file.write(buf, static_cast<std::streamsize>(size));
-
 
     return static_cast<int>(size);
 }

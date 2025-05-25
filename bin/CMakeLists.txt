@@ -7,6 +7,7 @@ target_link_libraries(${PROJECT_NAME}
         PUBLIC fuse-args-parser
         PUBLIC telegram-api-facade
         PUBLIC telegram-external-storage
+        PRIVATE nlohmann_json::nlohmann_json
 )
 
 target_include_directories(${PROJECT_NAME}

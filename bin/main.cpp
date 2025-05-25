@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdlib>
 
 #define FUSE_USE_VERSION 31
 #include <fuse3/fuse.h>
@@ -21,7 +22,7 @@ int main(const int argc, char** argv) {
     auto* state = new fes::FuseState{
         .mount_path = mount_point,
         .storage_interface =
-            std::make_unique<ftes::TelegramExternalStorage>(""),
+            std::make_unique<ftes::TelegramExternalStorage>(std::getenv("API_TOKEN")),
     };
 
     const int fuse_return = fuse_main(fuse_argc, fuse_argv, &operations, state);

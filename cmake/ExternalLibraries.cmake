@@ -17,4 +17,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cli11_proj)
 
+FetchContent_Declare(
+        json
+        URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+)
+FetchContent_MakeAvailable(json)
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_FILE_OFFSET_BITS=64 -Wall -lfuse3")
