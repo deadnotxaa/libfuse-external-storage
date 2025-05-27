@@ -34,7 +34,7 @@ public:
     }
 
 private:
-    inline static const std::string fuse_directory_name_ = "fuse-external-fs";
+    // inline static const std::string fuse_directory_name_ = "fuse-external-fs";
 
     static std::pair<std::filesystem::path, int> getFullCurrentPath(const char*, const FuseState*);
 

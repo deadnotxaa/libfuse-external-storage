@@ -40,6 +40,26 @@ ftes::TelegramApiFacade::TelegramApiFacade(std::string api_token)
                 metadata_file >> metadata_message_id_;
                 metadata_file.close();
             }
+        } else {
+            std::ofstream metadata_file(metadata_message_file_, std::ios::out);
+            // TODO: Send file with metadata
+            // TODO: Determine metadata structure
+
+            json initial_metadata = json::parse(R"(
+                               {
+                                    "files": [
+                                        {
+                                            "path": "",
+                                            "messageId" : "",
+                                            "metadata" : ""
+                                        }
+                                    ]
+                               }
+            )");
+
+            metadata_file << initial_metadata;
+
+            metadata_file.close();
         }
     } catch ([[maybe_unused]] const std::exception& e) {
         // No metadata message yet; will be created on first update

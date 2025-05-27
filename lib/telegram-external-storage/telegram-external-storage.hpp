@@ -8,9 +8,12 @@
 #define FUSE_USE_VERSION 31
 
 #include <fuse3/fuse.h>
+#include <nlohmann/json.hpp>
 
 #include "lib/telegram-api/telegram-api.hpp"
 #include "lib/external-storage-interface.hpp"
+
+using json = nlohmann::json;
 
 namespace fuse_telegram_external_storage {
 
@@ -19,6 +22,8 @@ public:
     explicit TelegramExternalStorage(const std::string& api_token);
 
     struct stat getAttr(std::filesystem::path&) override;
+
+    json getMetadata() const;
 
     ~TelegramExternalStorage() override;
 

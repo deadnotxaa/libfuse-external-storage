@@ -20,5 +20,21 @@ ftes::TelegramExternalStorage::~TelegramExternalStorage()
 }
 
 struct stat ftes::TelegramExternalStorage::getAttr(std::filesystem::path& path) {
-    return {};
+    struct stat st = {};
+
+
+
+    return st;
+}
+
+json ftes::TelegramExternalStorage::getMetadata() const {
+    json metadata = api_.getMetadata();
+
+    if (metadata.is_null()) {
+        metadata = json{{"files", json::array()}};
+
+        std::cerr << "[ftes::TelegramExternalStorage::getMetadata()]: " << metadata.dump() << std::endl;
+    }
+
+    return metadata;
 }

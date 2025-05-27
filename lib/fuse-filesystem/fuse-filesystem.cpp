@@ -31,7 +31,8 @@ std::pair<std::filesystem::path, int> fes::FuseFilesystem::getFullCurrentPath(co
 
 int fes::FuseFilesystem::ff_getattr(const char* path, struct stat* stbuf, fuse_file_info* fi) {
     std::cerr << "[ff_getattr]" << std::endl;
-    auto* current_fuse_state = static_cast<FuseState*>(fuse_get_context()->private_data);
+    const auto* current_fuse_state = static_cast<FuseState*>(fuse_get_context()->private_data);
+
     auto [current_path, error] = getFullCurrentPath(path, current_fuse_state);
 
     if (error) {
@@ -41,31 +42,20 @@ int fes::FuseFilesystem::ff_getattr(const char* path, struct stat* stbuf, fuse_f
     (void) fi;
     memset(stbuf, 0, sizeof(struct stat));
 
-    if (std::string_view(path) == "/empty.txt") {
-        stbuf->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IXUSR | S_IXGRP | S_IRGRP | S_IROTH | S_IXOTH;
-        stbuf->st_nlink = 2;
-
-        return 0;
-    }
-
     if (std::string_view(path) == "/") {
-        stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
-
-        return 0;
-    }
-
-    if (std::string_view(path) == "/" + fuse_directory_name_) {
         stbuf->st_mode = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IXGRP | S_IRGRP | S_IROTH | S_IXOTH;
         stbuf->st_nlink = 2;
 
         return 0;
     }
 
-    // TODO: Implement the logic to get file attributes from telegram
-    const struct stat external_stat = current_fuse_state->storage_interface->getAttr(current_path);
-    stbuf->st_mode = external_stat.st_mode;
-    stbuf->st_nlink = external_stat.st_nlink;
+    try {
+        *stbuf = current_fuse_state->storage_interface->getAttr(current_path);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_getattr] Error: " << e.what() << std::endl;
+        return -ENOENT;
+    }
 
     return 0;
 }
@@ -84,12 +74,6 @@ int fes::FuseFilesystem::ff_readdir(const char* path, void* buf, fuse_fill_dir_t
 
     // TODO: Implement the logic to read directory contents from telegram
 
-    if (std::string_view(path) == "/") {
-        struct stat stbuf{};
-        memset(&stbuf, 0, sizeof(struct stat));
-
-        filler(buf, fuse_directory_name_.c_str(), &stbuf, offset, static_cast<fuse_fill_dir_flags>(0));
-    }
 
     return 0;
 }
