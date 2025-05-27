@@ -8,6 +8,7 @@ target_link_libraries(${PROJECT_NAME}
         PUBLIC telegram-api-facade
         PUBLIC telegram-external-storage
         PRIVATE nlohmann_json::nlohmann_json
+        PUBLIC TgBot
 )
 
 target_include_directories(${PROJECT_NAME}
