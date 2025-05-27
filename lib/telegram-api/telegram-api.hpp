@@ -20,10 +20,10 @@ namespace fuse_telegram_external_storage {
 
     class TelegramApiFacade {
     public:
-        explicit TelegramApiFacade(const std::string& api_token);
+        explicit TelegramApiFacade(std::string api_token);
 
         // Initialize bot and start long polling
-        void longPollThread();
+        void longPollThread() const;
 
         // Send a file to the chat and return the message ID
         int64_t sendFile(const std::filesystem::path& path, const std::string& file_name) const;
@@ -46,10 +46,13 @@ namespace fuse_telegram_external_storage {
     private:
         std::string api_token_;
         TgBot::Bot bot_;
+
         std::string chat_id_file_ = std::string(getenv("HOME")) + "/chat_id.txt";
-        mutable int64_t metadata_message_id_ = 0; // Track metadata message ID
+        std::string metadata_message_file_ = std::string(getenv("HOME")) + "/metadata_message_id.txt";
+
+        mutable int64_t metadata_message_id_ = 0;
     };
 
-} // namespace fuse_telegram_external_storage
+} // fuse_telegram_external_storage
 
-#endif // TELEGRAM_API_HPP
+#endif //TELEGRAM_API_HPP
