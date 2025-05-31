@@ -65,18 +65,13 @@ int fes::FuseFilesystem::ff_readdir(const char* path, void* buf, fuse_fill_dir_t
         return error;
     }
 
+    // Always add . and .. entries
     filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
     filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 
-    // if (std::string_view(path) == "/") {
-    //     struct stat stbuf{};
-    //     memset(&stbuf, 0, sizeof(struct stat));
-    //
-    //     filler(buf, fuse_directory_name_.c_str(), &stbuf, offset, static_cast<fuse_fill_dir_flags>(0));
-    // }
-
     try {
-        const auto entries = state->storage_interface->listDir(current_path);
+        const auto entries = state->storage_interface->listDir(path);
+        std::cerr << "[ff_readdir] Got " << entries.size() << " entries" << std::endl;
 
         for (const auto& entry : entries) {
             struct stat st = {};
@@ -88,7 +83,9 @@ int fes::FuseFilesystem::ff_readdir(const char* path, void* buf, fuse_fill_dir_t
             st.st_ctime = entry.ctime;
             st.st_mtime = entry.mtime;
 
+            // Extract just the filename from the full path
             std::string name = std::filesystem::path(entry.path).filename().string();
+            std::cerr << "[ff_readdir] Adding entry: " << name << std::endl;
 
             filler(buf, name.c_str(), &st, 0, static_cast<fuse_fill_dir_flags>(0));
         }

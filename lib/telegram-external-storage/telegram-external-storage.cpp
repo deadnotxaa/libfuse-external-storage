@@ -16,17 +16,25 @@ ftes::TelegramExternalStorage::~TelegramExternalStorage() {
     }
 }
 
+// Debug the getAttr method to ensure it properly handles paths:
 struct stat ftes::TelegramExternalStorage::getAttr(std::filesystem::path& path) {
     struct stat stbuf = {};
     json metadata = getMetadata();
 
-    if (path == "/") {
+    // Handle root directory
+    if (path == "/" || path == "." || path.empty()) {
         stbuf.st_mode = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IXGRP | S_IRGRP | S_IROTH | S_IXOTH;
         stbuf.st_nlink = 2;
         return stbuf;
     }
 
-    const FileInfo* info = findFileInfo(path, metadata);
+    // Normalize path for lookup
+    std::string normalized_path = path.string();
+    if (normalized_path[0] != '/') {
+        normalized_path = "/" + normalized_path;
+    }
+
+    const FileInfo* info = findFileInfo(normalized_path, metadata);
 
     if (!info) {
         throw std::runtime_error("File not found");
@@ -46,46 +54,91 @@ std::vector<ftes::FileInfo> ftes::TelegramExternalStorage::listDir(const std::fi
     json metadata = getMetadata();
     std::vector<FileInfo> entries;
 
-    std::string target_path = path == "/" ? "/" : path.string();
-    if (target_path != "/") {
+    // Debug output
+    std::cerr << "[listDir] Listing directory: " << path << std::endl;
+    std::cerr << "[listDir] Metadata contains " << metadata["files"].size() << " files" << std::endl;
+
+    // Normalize the path for comparison
+    std::string target_path = path.string();
+    if (target_path.empty() || target_path == ".") {
+        target_path = "/";
+    } else if (target_path[0] != '/') {
         target_path = "/" + target_path;
     }
 
-    for (const auto& file : metadata["files"]) {
-        auto file_path = file["path"].get<std::string>();
-        if (std::filesystem::path(file_path).parent_path() == target_path) {
-            entries.push_back({
-                .path = file_path,
-                .message_id = file["message_id"].get<int64_t>(),
-                .ctime = file["ctime"].get<time_t>(),
-                .mtime = file["mtime"].get<time_t>(),
-                .size = file["size"].get<size_t>(),
-                .is_dir = file["is_dir"].get<bool>()
-            });
+    // If not ending with '/', add it for directory comparison
+    std::string dir_path = target_path;
+    if (dir_path != "/" && dir_path.back() != '/') {
+        dir_path += '/';
+    }
+
+    // Process files array
+    if (metadata.contains("files") && metadata["files"].is_array()) {
+        for (const auto& file_entry : metadata["files"]) {
+            if (!file_entry.contains("path") || !file_entry["path"].is_string()) {
+                std::cerr << "[listDir] Invalid file entry in metadata" << std::endl;
+                continue;
+            }
+
+            std::string file_path = file_entry["path"].get<std::string>();
+            std::cerr << "[listDir] Checking file: " << file_path << std::endl;
+
+            // Skip entry if path is malformed
+            if (file_path.empty() || file_path[0] != '/') {
+                continue;
+            }
+
+            // Extract filename and parent directory
+            std::filesystem::path p(file_path);
+            std::string parent_dir = p.parent_path().string();
+            if (parent_dir.empty()) parent_dir = "/";
+
+            // Check if this file belongs in the requested directory
+            if (parent_dir == target_path) {
+                FileInfo info;
+                info.path = file_path;
+                info.message_id = file_entry["message_id"].get<int64_t>();
+                info.size = file_entry["size"].get<size_t>();
+                info.is_dir = file_entry["is_dir"].get<bool>();
+                info.ctime = file_entry["ctime"].get<time_t>();
+                info.mtime = file_entry["mtime"].get<time_t>();
+                entries.push_back(info);
+                std::cerr << "[listDir] Added file: " << file_path << " (parent: " << parent_dir << ")" << std::endl;
+            }
         }
     }
 
+    std::cerr << "[listDir] Returning " << entries.size() << " entries" << std::endl;
     return entries;
 }
 
 int ftes::TelegramExternalStorage::createFile(const std::filesystem::path& path, mode_t mode) {
-    json metadata = getMetadata();
+    try {
+        json metadata = getMetadata();
 
-    if (findFileInfo(path, metadata)) {
-        return -EEXIST;
+        // First remove any existing file with the same path
+        removeFileInfo(path, metadata);
+
+        // Now add the new file info
+        time_t now = time(nullptr);
+        json file_info = {
+            {"path", path.string().empty() || path.string()[0] != '/' ? "/" + path.string() : path.string()},
+            {"message_id", 0},
+            {"size", 0},
+            {"is_dir", false},
+            {"ctime", now},
+            {"mtime", now}
+        };
+
+        // Add to metadata and update
+        metadata["files"].push_back(file_info);
+        updateMetadata(metadata);
+
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[createFile] Error: " << e.what() << std::endl;
+        return -EIO;
     }
-
-    // Create a temporary file to upload
-    std::string temp_file = "/tmp/fuse_telegram_" + std::to_string(time(nullptr));
-    std::ofstream ofs(temp_file, std::ios::binary);
-    ofs.close();
-
-    int64_t message_id = api_.sendFile(temp_file, path.filename().string());
-    std::filesystem::remove(temp_file);
-
-    addFileInfo(path, message_id, 0, false, metadata);
-    updateMetadata(metadata);
-    return 0;
 }
 
 int ftes::TelegramExternalStorage::readFile(const std::filesystem::path& path, char* buf, size_t size, off_t offset) {
@@ -96,85 +149,183 @@ int ftes::TelegramExternalStorage::readFile(const std::filesystem::path& path, c
         return -ENOENT;
     }
 
+    // Empty files (with message_id = 0) have no content to read
+    if (info->message_id == 0) {
+        return 0;  // EOF for empty files
+    }
+
+    // Check if offset is beyond file size
+    if (offset >= static_cast<off_t>(info->size)) {
+        return 0;  // EOF when offset is beyond file size
+    }
+
     std::string temp_file = "/tmp/fuse_telegram_" + std::to_string(time(nullptr));
 
     if (!api_.downloadFile(info->message_id, temp_file)) {
+        std::cerr << "[readFile] Failed to download file: " << path << std::endl;
         return -EIO;
+    }
+
+    // Verify the file exists and get its actual size
+    struct stat st;
+    if (stat(temp_file.c_str(), &st) != 0) {
+        std::cerr << "[readFile] Failed to stat temp file" << std::endl;
+        std::filesystem::remove(temp_file);
+        return -EIO;
+    }
+
+    // Update size in metadata if it doesn't match actual file size
+    if (static_cast<size_t>(st.st_size) != info->size) {
+        json updated_metadata = metadata;
+        removeFileInfo(path, updated_metadata);
+        addFileInfo(path, info->message_id, st.st_size, false, updated_metadata);
+        updateMetadata(updated_metadata);
     }
 
     std::ifstream ifs(temp_file, std::ios::binary);
     if (!ifs) {
+        std::cerr << "[readFile] Failed to open temp file" << std::endl;
         std::filesystem::remove(temp_file);
         return -EIO;
     }
 
+    // Calculate how many bytes we can actually read
+    size_t bytes_available = st.st_size - offset;
+    size_t bytes_to_read = std::min(size, bytes_available);
+
     ifs.seekg(offset);
-    ifs.read(buf, static_cast<std::streamsize>(size));
+    ifs.read(buf, bytes_to_read);
     size_t bytes_read = ifs.gcount();
     ifs.close();
 
     std::filesystem::remove(temp_file);
-
     return static_cast<int>(bytes_read);
 }
 
 int ftes::TelegramExternalStorage::writeFile(const std::filesystem::path& path, const char* buf, size_t size, off_t offset) {
-    json metadata = getMetadata();
-    FileInfo* info = findFileInfo(path, metadata);
+    try {
+        json metadata = getMetadata();
+        FileInfo* info = findFileInfo(path, metadata);
 
-    if (!info) {
-        return -ENOENT;
-    }
+        if (!info) {
+            return -ENOENT;
+        }
 
-    // Download existing file
-    std::string temp_file = "/tmp/fuse_telegram_" + std::to_string(time(nullptr));
+        // Create a temp file for content
+        std::string temp_file = "/tmp/fuse_telegram_" + std::to_string(time(nullptr));
 
-    if (!api_.downloadFile(info->message_id, temp_file)) {
-        return -EIO;
-    }
+        // Check if this is an existing file with content
+        if (info->message_id != 0) {
+            // Download existing content
+            if (!api_.downloadFile(info->message_id, temp_file)) {
+                std::cerr << "[writeFile] Failed to download file: " << path << std::endl;
+                return -EIO;
+            }
+        } else {
+            // Create an empty file for new writes
+            std::ofstream ofs(temp_file, std::ios::binary);
+            if (!ofs) {
+                std::cerr << "[writeFile] Failed to create temp file" << std::endl;
+                return -EIO;
+            }
+            ofs.close();
+        }
 
-    // Update file content
-    std::fstream fs(temp_file, std::ios::in | std::ios::out | std::ios::binary);
-    if (!fs) {
+        // Update file content at specified offset
+        std::fstream fs(temp_file, std::ios::in | std::ios::out | std::ios::binary);
+        if (!fs) {
+            std::filesystem::remove(temp_file);
+            return -EIO;
+        }
+
+        // Get current file size
+        fs.seekp(0, std::ios::end);
+        size_t current_size = fs.tellp();
+
+        // If offset is beyond current size, pad with zeros
+        if (offset > current_size) {
+            fs.seekp(current_size);
+            std::vector<char> padding(offset - current_size, 0);
+            fs.write(padding.data(), padding.size());
+        }
+
+        // Write the new data
+        fs.seekp(offset);
+        fs.write(buf, static_cast<std::streamsize>(size));
+        fs.close();
+
+        // Calculate new file size
+        size_t new_size = std::max(static_cast<size_t>(offset) + size, current_size);
+
+        // Upload new version
+        int64_t new_message_id = api_.sendFile(temp_file, path.filename().string());
+        if (new_message_id <= 0) {
+            std::filesystem::remove(temp_file);
+            return -EIO;
+        }
+
+        // Delete old message if it exists
+        if (info->message_id > 0) {
+            api_.deleteMessage(info->message_id);
+        }
+
+        // Update metadata - completely remove old entries and add new one
+        removeFileInfo(path, metadata);
+
+        // Normalize path for consistency
+        std::string path_str = path.string();
+        if (path_str.empty() || path_str == ".") {
+            path_str = "/";
+        } else if (path_str[0] != '/') {
+            path_str = "/" + path_str;
+        }
+
+        // Add updated file info
+        time_t now = time(nullptr);
+        metadata["files"].push_back({
+            {"path", path_str},
+            {"message_id", new_message_id},
+            {"size", new_size},
+            {"is_dir", false},
+            {"ctime", info->ctime},
+            {"mtime", now}
+        });
+
+        updateMetadata(metadata);
         std::filesystem::remove(temp_file);
+        return static_cast<int>(size);
+    } catch (const std::exception& e) {
+        std::cerr << "[writeFile] Error: " << e.what() << std::endl;
         return -EIO;
     }
-
-    fs.seekp(offset);
-    fs.write(buf, static_cast<std::streamsize>(size));
-    size_t new_size = std::max(info->size, static_cast<size_t>(offset) + size);
-    fs.close();
-
-    // Upload new file
-    int64_t new_message_id = api_.sendFile(temp_file, path.filename().string());
-    api_.deleteMessage(info->message_id);
-
-    // Update metadata
-    removeFileInfo(path, metadata);
-    addFileInfo(path, new_message_id, new_size, false, metadata);
-    updateMetadata(metadata);
-
-    std::filesystem::remove(temp_file);
-
-    return static_cast<int>(size);
 }
 
 int ftes::TelegramExternalStorage::unlinkFile(const std::filesystem::path& path) {
-    json metadata = getMetadata();
-    const FileInfo* info = findFileInfo(path, metadata);
+    try {
+        json metadata = getMetadata();
+        FileInfo* info = findFileInfo(path, metadata);
 
-    if (!info || info->is_dir) {
-        return -ENOENT;
-    }
+        if (!info || info->is_dir) {
+            return -ENOENT;
+        }
 
-    if (!api_.deleteMessage(info->message_id)) {
+        // Delete the message from Telegram if it has been uploaded
+        if (info->message_id > 0) {
+            if (!api_.deleteMessage(info->message_id)) {
+                std::cerr << "[unlinkFile] Failed to delete message: " << info->message_id << std::endl;
+                // Continue anyway to clean up metadata
+            }
+        }
+
+        // Remove all entries with this path
+        removeFileInfo(path, metadata);
+        updateMetadata(metadata);
+
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[unlinkFile] Error: " << e.what() << std::endl;
         return -EIO;
     }
-
-    removeFileInfo(path, metadata);
-    updateMetadata(metadata);
-
-    return 0;
 }
 
 int ftes::TelegramExternalStorage::createDir(const std::filesystem::path& path, mode_t mode) {
@@ -245,49 +396,121 @@ void ftes::TelegramExternalStorage::updateMetadata(const json& metadata) const {
     [[maybe_unused]] auto result = api_.updateMetadata(metadata);
 }
 
-ftes::FileInfo* ftes::TelegramExternalStorage::findFileInfo(const std::filesystem::path& path, json& metadata) const {
-    std::string target_path = path == "/" ? "/" : "/" + path.string();
+// Fix the findFileInfo to handle path normalization better
+ftes::FileInfo* ftes::TelegramExternalStorage::findFileInfo(const std::filesystem::path& path,
+                                                         nlohmann::json& metadata) const {
+    // Normalize path
+    std::string path_str = path.string();
+    if (path_str.empty() || path_str == ".") {
+        path_str = "/";
+    } else if (path_str[0] != '/') {
+        path_str = "/" + path_str;
+    }
+
+    std::cerr << "[findFileInfo] Looking for: " << path_str << std::endl;
+
+    // Check if files array exists
+    if (!metadata.contains("files") || !metadata["files"].is_array()) {
+        std::cerr << "[findFileInfo] No files array in metadata" << std::endl;
+        return nullptr;
+    }
+
+    // Find matching entry (return the one with a message_id if there are duplicates)
+    static FileInfo info;
+    FileInfo* result = nullptr;
 
     for (auto& file : metadata["files"]) {
-        if (file["path"].get<std::string>() == target_path) {
-            static FileInfo info;
+        if (file["path"] == path_str) {
+            // If we already found an entry but this one has a message_id, prefer this one
+            int64_t message_id = file["message_id"].get<int64_t>();
 
-            info.path = file["path"];
-            info.message_id = file["message_id"];
-            info.ctime = file["ctime"];
-            info.mtime = file["mtime"];
-            info.size = file["size"];
-            info.is_dir = file["is_dir"];
+            if (!result || (message_id > 0 && result->message_id == 0)) {
+                info.path = file["path"].get<std::string>();
+                info.message_id = message_id;
+                info.size = file["size"].get<size_t>();
+                info.is_dir = file["is_dir"].get<bool>();
+                info.ctime = file["ctime"].get<time_t>();
+                info.mtime = file["mtime"].get<time_t>();
+                result = &info;
 
-            return &info;
+                // If this entry has a message_id > 0, prefer it and stop searching
+                if (message_id > 0) {
+                    break;
+                }
+            }
         }
     }
 
-    return nullptr;
+    if (result) {
+        std::cerr << "[findFileInfo] Found file: " << path_str
+                  << " (message_id: " << result->message_id
+                  << ", size: " << result->size << ")" << std::endl;
+    } else {
+        std::cerr << "[findFileInfo] File not found: " << path_str << std::endl;
+    }
+
+    return result;
 }
 
-void ftes::TelegramExternalStorage::addFileInfo(const std::filesystem::path& path, int64_t message_id, size_t size, bool is_dir, json& metadata) const {
-    const json file_info = {
-        {"path", path == "/" ? "/" : "/" + path.string()},
+void ftes::TelegramExternalStorage::addFileInfo(const std::filesystem::path& path,
+                                              int64_t message_id,
+                                              size_t size,
+                                              bool is_dir,
+                                              nlohmann::json& metadata) const {
+    // Normalize the path
+    std::string path_str = path.string();
+    if (path_str.empty() || path_str == ".") {
+        path_str = "/";
+    } else if (path_str[0] != '/') {
+        path_str = "/" + path_str;
+    }
+
+    // Make sure we have a files array
+    if (!metadata.contains("files")) {
+        metadata["files"] = json::array();
+    }
+
+    // Create the file info object
+    json file_info = {
+        {"path", path_str},
         {"message_id", message_id},
-        {"ctime", time(nullptr)},
-        {"mtime", time(nullptr)},
         {"size", size},
-        {"is_dir", is_dir}
+        {"is_dir", is_dir},
+        {"ctime", time(nullptr)},
+        {"mtime", time(nullptr)}
     };
 
+    // Add to the files array
     metadata["files"].push_back(file_info);
+
+    std::cerr << "[addFileInfo] Added file to metadata: " << path_str
+              << " (message_id: " << message_id << ", size: " << size << ", is_dir: " << is_dir << ")" << std::endl;
 }
 
-void ftes::TelegramExternalStorage::removeFileInfo(const std::filesystem::path& path, json& metadata) const {
-    std::string target_path = path == "/" ? "/" : "/" + path.string();
-    json new_files = json::array();
-
-    for (const auto& file : metadata["files"]) {
-        if (file["path"].get<std::string>() != target_path) {
-            new_files.push_back(file);
-        }
+void ftes::TelegramExternalStorage::removeFileInfo(const std::filesystem::path& path, nlohmann::json& metadata) const {
+    // Normalize path
+    std::string path_str = path.string();
+    if (path_str.empty() || path_str == ".") {
+        path_str = "/";
+    } else if (path_str[0] != '/') {
+        path_str = "/" + path_str;
     }
 
-    metadata["files"] = new_files;
+    std::cerr << "[removeFileInfo] Removing: " << path_str << std::endl;
+
+    if (!metadata.contains("files") || !metadata["files"].is_array()) {
+        return;
+    }
+
+    // Use erase-remove idiom to remove all entries with the matching path
+    auto& files = metadata["files"];
+    files.erase(
+        std::remove_if(files.begin(), files.end(),
+            [&path_str](const auto& file) {
+                return file.contains("path") && file["path"] == path_str;
+            }),
+        files.end()
+    );
+
+    std::cerr << "[removeFileInfo] Metadata now contains " << metadata["files"].size() << " files" << std::endl;
 }
