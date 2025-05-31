@@ -1,14 +1,6 @@
 #include "fuse-filesystem.hpp"
-
-#include <algorithm>
 #include <iostream>
-#include <fstream>
-#include <filesystem>
 #include <cstring>
-#include <vector>
-
-#include <fcntl.h>
-#include <unistd.h>
 
 namespace fes = fuse_external_storage;
 
@@ -30,17 +22,23 @@ std::pair<std::filesystem::path, int> fes::FuseFilesystem::getFullCurrentPath(co
 }
 
 int fes::FuseFilesystem::ff_getattr(const char* path, struct stat* stbuf, fuse_file_info* fi) {
-    std::cerr << "[ff_getattr]" << std::endl;
-    const auto* current_fuse_state = static_cast<FuseState*>(fuse_get_context()->private_data);
+    std::cerr << "[ff_getattr] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
-    auto [current_path, error] = getFullCurrentPath(path, current_fuse_state);
-
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    (void) fi;
+    (void)fi;
     memset(stbuf, 0, sizeof(struct stat));
+
+    // if (std::string_view(path) == "/") {
+    //     stbuf->st_mode = S_IFDIR | 0755;
+    //     stbuf->st_nlink = 2;
+    //
+    //     return 0;
+    // }
 
     if (std::string_view(path) == "/") {
         stbuf->st_mode = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IXGRP | S_IRGRP | S_IROTH | S_IXOTH;
@@ -50,170 +48,197 @@ int fes::FuseFilesystem::ff_getattr(const char* path, struct stat* stbuf, fuse_f
     }
 
     try {
-        *stbuf = current_fuse_state->storage_interface->getAttr(current_path);
+        *stbuf = state->storage_interface->getAttr(current_path);
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "[ff_getattr] Error: " << e.what() << std::endl;
         return -ENOENT;
     }
-
-    return 0;
 }
 
 int fes::FuseFilesystem::ff_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, fuse_file_info* fi, fuse_readdir_flags flags) {
-    std::cerr << "[ff_readdir]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_readdir] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    // Necessary directories
+    // Always add . and .. entries
     filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
     filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
 
-    // TODO: Implement the logic to read directory contents from telegram
+    try {
+        const auto entries = state->storage_interface->listDir(path);
+        std::cerr << "[ff_readdir] Got " << entries.size() << " entries" << std::endl;
 
+        for (const auto& entry : entries) {
+            struct stat st = {};
 
-    return 0;
+            st.st_mode = entry.is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+            st.st_nlink = entry.is_dir ? 2 : 1;
+
+            st.st_size = static_cast<__off64_t>(entry.size);
+            st.st_ctime = entry.ctime;
+            st.st_mtime = entry.mtime;
+
+            // Extract just the filename from the full path
+            std::string name = std::filesystem::path(entry.path).filename().string();
+            std::cerr << "[ff_readdir] Adding entry: " << name << std::endl;
+
+            filler(buf, name.c_str(), &st, 0, static_cast<fuse_fill_dir_flags>(0));
+        }
+
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_readdir] Error: " << e.what() << std::endl;
+        return -EIO;
+    }
 }
 
 int fes::FuseFilesystem::ff_open(const char* path, fuse_file_info* fi) {
-    std::cerr << "[ff_open]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_open] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    const int fd = ::open(current_path.c_str(), fi->flags);
+    try {
+        const struct stat st = state->storage_interface->getAttr(current_path);
 
-    if (fd == -1) {
-        return -errno;
+        if (S_ISDIR(st.st_mode)) {
+            return -EISDIR;
+        }
+
+        return 0;
+    } catch ([[maybe_unused]] const std::exception& e) {
+        return -ENOENT;
     }
-    ::close(fd);
-
-    return 0;
 }
 
 int fes::FuseFilesystem::ff_read(const char* path, char* buf, size_t size, off_t offset, fuse_file_info* fi) {
-    std::cerr << "[ff_read]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_read] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    std::ifstream file(current_path, std::ios::binary);
-    if (!file.good()) {
-        return -errno;
+    try {
+        return state->storage_interface->readFile(current_path, buf, size, offset);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_read] Error: " << e.what() << std::endl;
+        return -EIO;
     }
-
-    file.seekg(offset);
-    file.read(buf, static_cast<std::streamsize>(size));
-
-    return static_cast<int>(file.gcount());
 }
 
 int fes::FuseFilesystem::ff_write(const char* path, const char* buf, size_t size, off_t offset, fuse_file_info* fi) {
-    std::cerr << "[ff_write]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_write] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    std::fstream file(current_path, std::ios::in | std::ios::out | std::ios::binary);
-    if (!file.good()) {
-        return -errno;
+    try {
+        return state->storage_interface->writeFile(current_path, buf, size, offset);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_write] Error: " << e.what() << std::endl;
+        return -EIO;
     }
-
-    file.seekp(offset);
-    file.write(buf, static_cast<std::streamsize>(size));
-
-    return static_cast<int>(size);
 }
 
 int fes::FuseFilesystem::ff_create(const char* path, mode_t mode, fuse_file_info* fi) {
-    std::cerr << "[ff_create]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_create] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    const int fd = ::open(current_path.c_str(), O_CREAT | O_WRONLY, mode);
-
-    if (fd == -1) {
-        return -errno;
+    try {
+        return state->storage_interface->createFile(current_path, mode);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_create] Error: " << e.what() << std::endl;
+        return -EIO;
     }
-    ::close(fd);
-
-    return 0;
 }
 
 int fes::FuseFilesystem::ff_unlink(const char* path) {
-    std::cerr << "[ff_unlink]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_unlink] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    return std::filesystem::remove(current_path) ? 0 : -errno;
+    try {
+        return state->storage_interface->unlinkFile(current_path);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_unlink] Error: " << e.what() << std::endl;
+        return -EIO;
+    }
 }
 
-int fes::FuseFilesystem::ff_rename(const char* path_from, const char* path_to, unsigned int flags) {
-    std::cerr << "[ff_rename]" << std::endl;
-    auto [current_path_from, error_from] = getFullCurrentPath(path_from, static_cast<FuseState*>(fuse_get_context()->private_data));
+int fes::FuseFilesystem::ff_rename(const char* path_from, const char* path_to, [[maybe_unused]] unsigned int flags) {
+    std::cerr << "[ff_rename] " << path_from << " to " << path_to << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
+
+    auto [current_path_from, error_from] = getFullCurrentPath(path_from, state);
     if (error_from) {
         return error_from;
     }
 
-    auto [current_path_to, error_to] = getFullCurrentPath(path_to, static_cast<FuseState*>(fuse_get_context()->private_data));
+    auto [current_path_to, error_to] = getFullCurrentPath(path_to, state);
     if (error_to) {
         return error_to;
     }
 
-    const std::string absolute_path_from{current_path_from.string() + std::string(path_from)};
-    const std::string absolute_path_to{current_path_from.string() + std::string(path_to)};
-
-    const std::filesystem::path full_path_from = absolute_path_from;
-    const std::filesystem::path full_path_to = absolute_path_to;
-
-    std::error_code ec;
-    std::filesystem::rename(full_path_from, full_path_to, ec);
-
-    return ec ? -errno : 0;
+    try {
+        return state->storage_interface->rename(current_path_from, current_path_to);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_rename] Error: " << e.what() << std::endl;
+        return -EIO;
+    }
 }
 
 int fes::FuseFilesystem::ff_mkdir(const char* path, mode_t mode) {
-    std::cerr << "[ff_mkdir]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_mkdir] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directory(current_path, ec);
-
-    if (ec) {
-        return -errno;
+    try {
+        return state->storage_interface->createDir(current_path, mode);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_mkdir] Error: " << e.what() << std::endl;
+        return -EIO;
     }
-
-    chmod(current_path.c_str(), mode);
-
-    return 0;
 }
 
 int fes::FuseFilesystem::ff_rmdir(const char* path) {
-    std::cerr << "[ff_rmdir]" << std::endl;
-    auto [current_path, error] = getFullCurrentPath(path, static_cast<FuseState*>(fuse_get_context()->private_data));
+    std::cerr << "[ff_rmdir] " << path << std::endl;
+    const auto* state = static_cast<FuseState*>(fuse_get_context()->private_data);
 
+    auto [current_path, error] = getFullCurrentPath(path, state);
     if (error) {
         return error;
     }
 
-    return std::filesystem::remove(current_path) ? 0 : -errno;
+    try {
+        return state->storage_interface->removeDir(current_path);
+    } catch (const std::exception& e) {
+        std::cerr << "[ff_rmdir] Error: " << e.what() << std::endl;
+        return -EIO;
+    }
 }
